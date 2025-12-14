@@ -8,7 +8,7 @@ import scipy.optimize as op
 # =============================
 # Configuración interactiva
 # =============================
-st.title("Simulador de Estrategias de Inversión con Optimización")
+st.title("Simulador de Estrategias de Inversión")
 
 # Parámetros configurables en la barra lateral
 st.sidebar.header("Configuración")
@@ -19,7 +19,10 @@ rf = st.sidebar.number_input("Tasa libre de riesgo anual (%)",
 n_mc = st.sidebar.number_input("Número de portafolios para simulación", value=5000, min_value=1000, step=1000)
 
 menu = st.sidebar.selectbox("Seleccione la estrategia:", ["Regiones del Mundo", "Sectores de EE.UU."])
-
+vista_bl = st.sidebar.selectbox(
+    "Vista Black Litterman (Q)",
+    [   "Markowitz", "Maximo Sharpe","Minima Varianza","Maximo Retorno"])
+ 
 # =============================
 # Descargar datos históricos
 # =============================
@@ -85,7 +88,6 @@ def calcular_cvar(returns, confidence=0.95):
     VaR = returns.quantile(1 - confidence)
     CVaR = returns[returns <= VaR].mean()
     return CVaR
-
 
 def calcular_drawdown(returns):
     cumulative = (1 + returns).cumprod()
@@ -197,6 +199,40 @@ def efficient_frontier(mean_returns, cov_matrix, n_points=40):
     return np.array(frontier_vols), np.array(frontier_rets)
 
 # =============================
+# Black Litterman
+# =============================4
+def vistas(vista, mean_returns, results, market_weights, bench):
+    n = len(mean_returns)
+
+    if vista == "Markowitz":
+        P=np.eye(n)
+        Q= mean_returns.copy()
+    elif vista == "Maximo Sharpe":
+        w = results["max_sharpe"]["weights"]
+        P=w.reshape(1,-1)
+        Q= np.array([results["max_sharpe"]["return"]])
+
+    elif vista == "Minima Varianza":
+         w = results["min_var"]["weights"]
+         P=w.reshape(1,-1)
+         Q= np.array([results["min_var"]["return"]])
+    elif vista == "Maximo Retorno":
+         w = results["max_ret"]["weights"]
+         P=w.reshape(1,-1)
+         Q= np.array([results["max_ret"]["return"]])
+    return P, Q
+
+
+def black_litterman(mean_returns, cov_matrix, tau, delta,P,Q, market_weights):
+    n = len(mean_returns)
+    pi = delta * cov_matrix @market_weights
+    omega = np.diag(np.diag(P @ (tau *cov_matrix) @ P.T))
+    middle = np.linalg.inv(np.linalg.inv(tau*cov_matrix) +P.T @np.linalg.inv(omega)@P)
+    mu_bl = middle@(np.linalg.inv(tau *cov_matrix) @pi +P.T @ np.linalg.inv(omega)@Q)
+    cov_bl = cov_matrix +middle
+    return mu_bl, cov_bl
+
+# =============================
 # Selección de estrategia y datos activos
 # =============================
 if menu == "Regiones del Mundo":
@@ -209,6 +245,11 @@ else:
     benchmark = benchmark_sectores
 
 st.subheader(f"Estrategia seleccionada: {menu}")
+
+if menu == "Regiones del Mundo":
+    market_weights = pesos_regiones
+else:
+    market_weights = pesos_sectores
 
 # =============================
 # Portafolio arbitrario definido por el usuario
@@ -234,13 +275,12 @@ pesos_dict = {col: round(w, 4) for col, w in zip(datos.columns, user_weights)}
 st.dataframe(pesos_dict)
 
 # =============================
-
-# Distribución de rendimientos del portafolio del usuario
+# Distribución de rendimientos del portafolio 
 # =============================
 st.write("### Distribución de rendimientos del portafolio arbitrario")
 port_ret = datos @ user_weights
 fig_hist = px.histogram(port_ret, nbins=40, title='Distribución de rendimientos diarios',
-                        labels={'value':'Rendimiento diario'}, color_discrete_sequence=['orange'])
+                        labels={'value':'Rendimiento diario'}, color_discrete_sequence=['#89CFF0'])
 fig_hist.update_layout(showlegend=False)
 
 st.plotly_chart(fig_hist, use_container_width=True)
@@ -253,17 +293,32 @@ st.write("### Métricas del portafolio arbitrario")
 st.dataframe(pd.DataFrame(metricas, index=["Portafolio"]).round(4).T, use_container_width=True)
 
 # =============================
-# Estadísticas y optimización exacta
+# Estadísticas y optimización 
 # =============================
 mean_returns = datos.mean() * periods_per_year
 cov_matrix = datos.cov() * periods_per_year
 
-
-
-st.write("### Optimización")
+st.write("### Partafolios Markowitz y Black Litterman")
 results = optimize_portfolio(mean_returns.values, cov_matrix.values)
+st.sidebar.subheader("Vista Black–Litterman (P)")
 
-# Mostrar tablas de pesos y resumen ejecutivo
+P = np.zeros((1, len(universo)))
+for i, asset in enumerate(universo):
+    P[0, i] = st.sidebar.slider(
+        f"Peso de {asset} en la vista",
+        0.0, 1.0, 0.0, 0.05
+    )
+
+st.write("### Matriz P seleccionada (expectativas absolutas)")
+st.dataframe(pd.DataFrame(P, columns=universo))
+
+P,Q = vistas(vista=vista_bl, mean_returns=mean_returns.values,
+               results=results, market_weights=market_weights, bench=benchmark)
+mu_bl, cov_bl = black_litterman(mean_returns.values, cov_matrix.values,0.05,2.5,P=P,Q=Q, market_weights=market_weights)
+
+results_bl = optimize_portfolio(mu_bl,cov_bl)
+
+# Mostrar tablas de pesos 
 def format_portfolio_result(name, res, tickers):
     df = pd.DataFrame({'Ticker': tickers, 'Peso': res['weights']})
     summary = {
@@ -283,20 +338,30 @@ for key, label in [('min_var', 'Mínima varianza'),
         df_res, summary = format_portfolio_result(label, results[key], universo)
         tables.append((label, df_res))
         summaries.append(summary)
-
+        
+if "max_sharpe" in results_bl:
+    df_res, summary =format_portfolio_result("Black Litterman",
+        results_bl['max_sharpe'],
+        universo)
+    
+tables.append(("Black Litterman", df_res))
+summaries.append(summary)
 
 st.write("### Resumen de portafolios óptimos")
 st.dataframe(pd.DataFrame(summaries))
 
 # =============================
-# Frontera eficiente exacta y CML
+# Frontera eficiente y CML
 # =============================
 st.write("### Frontera eficiente y línea de mercado de capital (CML)")
 front_vols, front_rets = efficient_frontier(mean_returns.values, cov_matrix.values, n_points=40)
+front_vols_bl, front_rets_bl = efficient_frontier(mu_bl,cov_bl, n_points=1000)
 
 fig_front = px.scatter(x=front_vols, y=front_rets,
                        labels={'x': 'Volatilidad anual', 'y': 'Retorno anual'},
                        title='Frontera eficiente')
+#fig_front.add_scatter( x=front_vols_bl,  y=front_rets_bl, mode='lines',
+#                     name= 'Frontera Black Litterman', line=dict(dash='dot',width=2))
 if 'min_var' in results:
     fig_front.add_scatter(x=[results['min_var']['vol']], y=[results['min_var']['return']],
                           mode='markers', name='Mínima varianza',
@@ -313,6 +378,11 @@ if 'max_ret' in results:
     fig_front.add_scatter(x=[results['max_ret']['vol']], y=[results['max_ret']['return']],
                           mode='markers', name='Máximo retorno',
                           marker=dict(size=10, color='purple'))
+if 'max_sharpe' in results_bl:
+    fig_front.add_scatter(x=[results_bl['max_sharpe']['vol']], y=[results_bl['max_sharpe']['return']],
+                          mode='markers', name='Black Ltterman',
+                          marker=dict(size=10, symbol='star',color ="black"))
+    
 st.plotly_chart(fig_front, use_container_width=True)
 
 
@@ -337,13 +407,13 @@ best_sharpe = df_mc.loc[df_mc['Sharpe'].idxmax()]
 min_vol = df_mc.loc[df_mc['Volatilidad'].idxmin()]
 
 # =============================
-#  Portafolio vs Benchmark
+#  Portafolios vs Benchmark
 # =============================
 st.write("###  Portafolios vs Benchmark")
 capital_port = (1 + port_ret).cumprod()
 
 capital_bmk = (1 + benchmark.loc[port_ret.index]).cumprod()
-tabs = st.tabs(["Portafolio Arbitrario", "Max Sharpe", "Minima Volatilidad"])
+tabs = st.tabs(["Portafolio Arbitrario", "Max Sharpe", "Minima Volatilidad","Max Retorno","Black Litterman"])
 
 with tabs[0]:
     st.write("### Evolución del Portafolio Arbitrario vs Benchmark")
@@ -355,7 +425,7 @@ with tabs[0]:
 
     fig_capital = px.line(df_capital,
                           title="Portafolio Arbitrario vs Benchmark",
-                          labels={'value': 'Capital acumulado'})
+                          labels={'value': 'Rendimiento'})
     st.plotly_chart(fig_capital, use_container_width=True)
 
 with tabs[1]:
@@ -367,7 +437,7 @@ with tabs[1]:
     })
     fig_sharpe = px.line(df_sharpe,
                          title="Portafolio de Máximo Sharpe vs Benchmark",
-                         labels={'value': 'Capital acumulado'})
+                         labels={'value': 'Rendimiento'})
     st.plotly_chart(fig_sharpe, use_container_width=True)
 
 with tabs[2]:
@@ -379,5 +449,37 @@ with tabs[2]:
     })
     fig_minvol = px.line(df_minvol,
                          title="Portafolio de Mínima Volatilidad vs Benchmark",
-                         labels={'value': 'Capital acumulado'})
+                         labels={'value': 'Rendimiento'})
     st.plotly_chart(fig_minvol, use_container_width=True)
+
+with tabs[4]:
+    st.write("### Portafolio Black Litterman (vistas absolutas)pvs Benchmark")
+    w_bl = results_bl["max_sharpe"]["weights"]
+    port_ret_bl = datos@w_bl
+    capital_bl = (1 + port_ret_bl).cumprod()
+    df_bl = pd.DataFrame({
+        'Black Litterman': capital_bl,
+        'Benchmark': capital_bmk
+    })
+    fig_bl = px.line(df_bl,
+                         title="Portafolio Black Litterman vs Benchmark",
+                         labels={'value': 'Rendimiento'})
+    st.plotly_chart(fig_bl, use_container_width=True)
+
+with tabs[3]:
+    st.write("### Portafolio de Máximo Retorno vs Benchmark")
+    w_max_ret = results["max_ret"]["weights"]
+    port_ret_max = datos @ w_max_ret
+    capital_max_ret = (1 + port_ret_max).cumprod()
+    df_max_ret = pd.DataFrame({
+        'Máximo Retorno': capital_max_ret,
+        'Benchmark': capital_bmk
+    })
+    fig_max_ret = px.line(
+        df_max_ret,
+        title="Portafolio de Máximo Retorno vs Benchmark",
+        labels={'value': 'Capital acumulado'}
+    )
+
+    st.plotly_chart(fig_max_ret, use_container_width=True)
+    
